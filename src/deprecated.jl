@@ -88,3 +88,11 @@ end false
                      comm::Comm),
            Sendrecv!(view(sendbuf, 1:sendcount), dest, sendtag,
                      view(recvbuf, 1:recvcount), source, recvtag, comm), false)
+
+@deprecate(Bcast!(buffer, count::Integer, root::Integer, comm::Comm),
+           Bcast!(view(buffer, 1:count), root, comm), false)
+
+@deprecate(Scatter!(sendbuf, recvbuf, count::Integer, root::Integer, comm::Comm),
+           Scatter!(ChunkBuffer(sendbuf, count), recvbuf, root, comm), false)
+@deprecate(Scatterv!(sendbuf, recvbuf, counts::Vector, root::Integer, comm::Comm),
+           Scatterv!(VChunkBuffer(sendbuf, counts), recvbuf, root, comm), false)

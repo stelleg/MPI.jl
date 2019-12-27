@@ -1,5 +1,3 @@
-const IN_PLACE = MPI_IN_PLACE
-
 """
     Barrier(comm::Comm)
 
@@ -26,19 +24,16 @@ Broadcast the first `count` elements of the buffer `buf` from `root` to all proc
 # External links
 $(_doc_external("MPI_Bcast"))
 """
-function Bcast!(buffer, count::Integer,
-                root::Integer, comm::Comm)
-
+function Bcast!(buf::Buffer, root::Integer, comm::Comm)
     # int MPI_Bcast(void* buffer, int count, MPI_Datatype datatype, int root,
     #               MPI_Comm comm)
     @mpichk ccall((:MPI_Bcast, libmpi), Cint,
                   (MPIPtr, Cint, MPI_Datatype, Cint, MPI_Comm),
-                  buffer, count, Datatype(eltype(buffer)), root, comm)
-    buffer
+                  buf.data, buf.count, buf.datatype, root, comm)
+    buf.data
 end
-
-function Bcast!(buffer::Union{Ref, AbstractArray}, root::Integer, comm::Comm)
-    Bcast!(buffer, length(buffer), root, comm)
+function Bcast!(data, root::Integer, comm::Comm)
+    Bcast!(Buffer(data), root, comm)
 end
 
 function bcast(obj, root::Integer, comm::Comm)
@@ -46,7 +41,7 @@ function bcast(obj, root::Integer, comm::Comm)
     count = Ref{Cint}()
     if isroot
         buf = MPI.serialize(obj)
-        count[] = length(buf)
+        count[] = length()
     end
     Bcast!(count, root, comm)
     if !isroot
@@ -60,25 +55,25 @@ function bcast(obj, root::Integer, comm::Comm)
 end
 
 """
-    Scatter!(sendbuf, recvbuf[, count=length(recvbuf)], root::Integer, comm::Comm)
+    Scatter!(sendbuf, recvbuf, root::Integer, comm::Comm)
 
-Splits the buffer `sendbuf` in the `root` process into `Comm_size(comm)` chunks of length
-`count`, and sends the `j`-th chunk to the process of rank `j` into the `recvbuf` buffer.
+Splits the buffer `sendbuf` in the `root` process into `Comm_size(comm)` chunks,
+sending the `j`-th chunk to the process of rank `j` into the `recvbuf` buffer.
 
-`sendbuf` on the root process should be a buffer of length `count*Comm_size(comm)`, and
-on non-root processes it is ignored and can be `nothing`.
+`sendbuf` on the root process should be a [`ChunkBuffer`](@ref), or an `Array` if the
+`count` can be determined from `recvbuf`. On non-root processes it is ignored, and can be
+`nothing`.
 
-`recvbuf` can be `nothing` on the root process, in which case it is unmodified (this
+`recvbuf` is a [`Buffer`](@ref) object, or any object for which `Buffer(recvbuf)` is
+defined. On the root process, it can also be `nothing`, in which case it is ignored (this
 corresponds the behaviour of `MPI_IN_PLACE` in `MPI_Scatter`). For example
 ```
 if root == MPI.Comm_rank(comm)
-    Scatter!(buf, nothing, count, root, comm)
+    Scatter!(ChunkBuffer(buf, count), nothing, root, comm)
 else
-    Scatter!(nothing, buf, count, root, comm)        
+    Scatter!(nothing, buf, root, comm)        
 end
 ```
-
-`count` should be the same for all processes.
 
 # See also
 - [`Scatter`](@ref) to allocate the output buffer.
@@ -87,29 +82,29 @@ end
 # External links
 $(_doc_external("MPI_Scatter"))
 """
-function Scatter!(sendbuf, recvbuf, count::Integer, root::Integer, comm::Comm)
-    isroot = Comm_rank(comm) == root
-    if isroot
-        @assert sendbuf !== nothing
-        @assert_minlength sendbuf count*Comm_size(comm)
-        if recvbuf === nothing
-            recvbuf = MPI_IN_PLACE
-        end
+function Scatter!(sendbuf::ChunkBuffer, recvbuf::Buffer, root::Integer, comm::Comm)
+    if sendbuf.nchunks !== nothing && Comm_rank(comm) == root
+        @assert sendbuf.nchunks >= Comm_size(comm)
     end
-    @assert_minlength recvbuf count
-    T = recvbuf isa SentinelPtr ? eltype(sendbuf) : eltype(recvbuf)
     # int MPI_Scatter(const void* sendbuf, int sendcount, MPI_Datatype sendtype,
     #                 void* recvbuf, int recvcount, MPI_Datatype recvtype, int root,
     #                 MPI_Comm comm)
     @mpichk ccall((:MPI_Scatter, libmpi), Cint,
-                  (MPIPtr, Cint, MPI_Datatype, MPIPtr, Cint, MPI_Datatype, Cint, MPI_Comm),
-                  sendbuf, count, Datatype(T), recvbuf, count, Datatype(T), root, comm)
-    recvbuf
+                  (MPIPtr, Cint, MPI_Datatype,
+                   MPIPtr, Cint, MPI_Datatype, Cint, MPI_Comm),
+                  sendbuf.data, sendbuf.count, sendbuf.datatype,
+                  recvbuf.data, recvbuf.count, recvbuf.datatype, root, comm)
+    recvbuf.data
 end
+Scatter!(sendbuf::ChunkBuffer, recvbuf, root::Integer, comm::Comm) =
+    Scatter!(sendbuf::ChunkBuffer, Buffer(recvbuf), root::Integer, comm::Comm)
+Scatter!(sendbuf::AbstractArray, recvbuf::Union{Ref,AbstractArray}, root::Integer, comm::Comm) =
+    Scatter!(ChunkBuffer(sendbuf,length(recvbuf)), recvbuf, root, comm)    
+Scatter!(sendbuf::Nothing, recvbuf, root::Integer, comm::Comm) =
+    Scatter!(ChunkBuffer(), recvbuf, root, comm)
+Scatter!(sendbuf::ChunkBuffer, recvbuf::Nothing, root::Integer, comm::Comm) =
+    Scatter!(sendbuf, IN_PLACE, root, comm)
 
-function Scatter!(sendbuf::AbstractArray, recvbuf::Union{Ref,AbstractArray}, root::Integer, comm::Comm)
-    Scatter!(sendbuf, recvbuf, length(recvbuf), root, comm)    
-end
 
 """
     Scatter(sendbuf, count, root, comm)
@@ -153,28 +148,26 @@ end
 # External links
 $(_doc_external("MPI_Scatterv"))
 """
-function Scatterv!(sendbuf, recvbuf, counts::Vector, root::Integer, comm::Comm)
-    rank = Comm_rank(comm)
-    isroot = rank == root
-    if isroot
-        @assert sendbuf !== nothing
-        @assert_minlength sendbuf sum(counts)
+function Scatterv!(sendbuf::VChunkBuffer, recvbuf::Buffer, root::Integer, comm::Comm)
+    if Comm_rank(comm) == root
+        @assert length(sendbuf.counts) >= Comm_size(comm)
     end
-    if recvbuf === nothing
-        recvbuf = MPI_IN_PLACE
-    end
-    @assert_minlength recvbuf counts[rank+1]
-    T = recvbuf isa SentinelPtr ? eltype(sendbuf) : eltype(recvbuf)
-    recvcnt = counts[Comm_rank(comm) + 1]
-    disps = accumulate(+, counts) - counts
     # int MPI_Scatterv(const void* sendbuf, const int sendcounts[],
     #                  const int displs[], MPI_Datatype sendtype, void* recvbuf,
     #                  int recvcount, MPI_Datatype recvtype, int root, MPI_Comm comm)
     @mpichk ccall((:MPI_Scatterv, libmpi), Cint,
-                  (MPIPtr, Ptr{Cint}, Ptr{Cint}, MPI_Datatype, MPIPtr, Cint, MPI_Datatype, Cint, MPI_Comm),
-                  sendbuf, counts, disps, Datatype(T), recvbuf, recvcnt, Datatype(T), root, comm)
+                  (MPIPtr, Ptr{Cint}, Ptr{Cint},  MPI_Datatype,
+                   MPIPtr, Cint, MPI_Datatype, Cint, MPI_Comm),
+                  sendbuf.data, sendbuf.counts, sendbuf.displs, sendbuf.datatype,
+                  recvbuf.data, recvbuf.count, recvbuf.datatype, root, comm)
     recvbuf
 end
+Scatterv!(sendbuf::VChunkBuffer, recvbuf, root::Integer, comm::Comm) =
+    Scatterv!(sendbuf, Buffer(recvbuf), root, comm)
+Scatterv!(sendbuf::VChunkBuffer, recvbuf::Nothing, root::Integer, comm::Comm) =
+    Scatterv!(sendbuf, IN_PLACE, root, comm)
+Scatterv!(sendbuf::Nothing, recvbuf, root::Integer, comm::Comm) =
+    Scatterv!(VChunkBuffer(), recvbuf, root, comm)
 
 """
     Scatterv(sendbuf, counts, root, comm)
