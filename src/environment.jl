@@ -56,7 +56,6 @@ end
 function EmptyInit() 
     REFCOUNT[] == -1 || error("MPI.REFCOUNT in incorrect state: MPI may only be initialized once per session.")
     REFCOUNT[] = 1
-    atexit(refcount_dec)
 
     for f in mpi_init_hooks
         f()
